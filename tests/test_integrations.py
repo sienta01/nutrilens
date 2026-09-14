@@ -84,7 +84,7 @@ async def test_estimate_requires_key_without_network(monkeypatch):
     fake = AsyncMock()
     monkeypatch.setattr(vision.httpx, "AsyncClient", fake)
     with pytest.raises(vision.VisionError, match="isn't configured") as error:
-        await vision.estimate_meal(photo_bytes(), "", Settings(ai_provider="openai", openai_api_key=""))
+        await vision.estimate_meal(photo_bytes(), "", Settings(_env_file=None, ai_provider="openai", openai_api_key=""))
     assert error.value.status_code == 503
     fake.assert_not_called()
 
@@ -92,7 +92,7 @@ async def test_estimate_requires_key_without_network(monkeypatch):
 @pytest.mark.asyncio
 async def test_estimate_uses_schema_image_and_no_storage(monkeypatch):
     calls = mock_provider(monkeypatch, provider_body(valid_estimate()))
-    result = await vision.estimate_meal(photo_bytes(), "half a bowl", Settings(ai_provider="openai", openai_api_key="test-secret"))
+    result = await vision.estimate_meal(photo_bytes(), "half a bowl", Settings(_env_file=None, ai_provider="openai", openai_api_key="test-secret"))
     assert result["calories"] == 510
     assert "is_food" not in result
     request = json.loads(calls[0].content)
@@ -111,14 +111,14 @@ async def test_estimate_uses_schema_image_and_no_storage(monkeypatch):
 async def test_estimate_rejects_nonfood_and_invalid_values(monkeypatch, changes):
     mock_provider(monkeypatch, provider_body(valid_estimate(**changes)))
     with pytest.raises(vision.VisionError):
-        await vision.estimate_meal(photo_bytes(), "", Settings(ai_provider="openai", openai_api_key="test-secret"))
+        await vision.estimate_meal(photo_bytes(), "", Settings(_env_file=None, ai_provider="openai", openai_api_key="test-secret"))
 
 
 @pytest.mark.asyncio
 async def test_provider_failure_never_exposes_secret(monkeypatch):
     mock_provider(monkeypatch, {"error": {"message": "Authorization test-secret failed"}}, 401)
     with pytest.raises(vision.VisionError) as error:
-        await vision.estimate_meal(photo_bytes(), "", Settings(ai_provider="openai", openai_api_key="test-secret"))
+        await vision.estimate_meal(photo_bytes(), "", Settings(_env_file=None, ai_provider="openai", openai_api_key="test-secret"))
     assert error.value.status_code == 503
     assert "test-secret" not in str(error.value)
 

@@ -21,7 +21,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.models import BotUpdate, LinkCode, Meal, User
-from app.security import RateLimiter, token_hash
+from app.security import RateLimiter, RedactSecrets, token_hash
 from app.vision import VisionError
 
 if TYPE_CHECKING:
@@ -39,18 +39,6 @@ class TelegramError(Exception):
         super().__init__(f"Telegram request failed (status {code}).")
 
 
-class _RedactToken(logging.Filter):
-    def __init__(self, token: str):
-        super().__init__()
-        self.token = token
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if self.token:
-            record.msg = record.getMessage().replace(self.token, "[REDACTED]")
-            record.args = ()
-        return True
-
-
 class TelegramBot:
     def __init__(self, settings: Settings, database: Any):
         self.settings = settings
@@ -58,7 +46,7 @@ class TelegramBot:
         self._client: httpx.AsyncClient | None = None
         self._photo_limiter = RateLimiter()
         # httpx's ordinary INFO request log includes the token in Telegram URLs.
-        logging.getLogger("httpx").addFilter(_RedactToken(settings.telegram_bot_token))
+        logging.getLogger("httpx").addFilter(RedactSecrets(settings.telegram_bot_token))
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:

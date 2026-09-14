@@ -22,13 +22,17 @@ def app_factory(tmp_path):
                 "demo_enabled": True,
                 "telegram_polling": False,
                 "cookie_secure": False,
+                "log_file": "",
                 "openai_api_key": "",
                 "gemini_api_key": "",
+                "groq_api_key": "",
                 "ai_provider": "gemini",
                 "telegram_bot_token": "",
             }
             settings_values.update(overrides)
-            application = create_app(Settings(**settings_values))
+            # _env_file=None: a developer's real .env (AI_n_* lines especially) must never
+            # decide what a test sees. Every value a test depends on is set above.
+            application = create_app(Settings(_env_file=None, **settings_values))
             client = stack.enter_context(
                 TestClient(application, headers={"X-Requested-With": "NutriLens"})
             )

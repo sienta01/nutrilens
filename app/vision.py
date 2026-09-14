@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 import math
 import warnings
 from typing import TYPE_CHECKING, Any
@@ -12,8 +13,12 @@ from typing import TYPE_CHECKING, Any
 import httpx
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from app.config import PROVIDER_LABELS, AiLine
+
 if TYPE_CHECKING:
     from app.config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class VisionError(Exception):
@@ -137,25 +142,59 @@ def _validate_estimate(value: Any) -> dict[str, Any]:
     return result
 
 
+def _not_configured(settings: Settings) -> str:
+    label = PROVIDER_LABELS[settings.ai_primary_provider]
+    article = "an" if label[0] in "AEIOU" else "a"
+    return (f"Meal analysis isn't configured yet. Add {article} {label} API key on the server, "
+            "or log exact values with /log Meal name | calories.")
+
+
+async def _run_chain(image_bytes: bytes | None, notes: str, settings: Settings) -> dict[str, Any]:
+    """Try each configured line in order, moving on only when a provider *failed* to answer."""
+    chain = settings.ai_chain
+    if not chain:
+        raise VisionError(_not_configured(settings), 503)
+    total = len(chain)
+    last_error: VisionError | None = None
+    for position, line in enumerate(chain, start=1):
+        label = PROVIDER_LABELS[line.provider]
+        logger.info("Meal analysis line %d/%d: asking %s (%s).", position, total, label, line.model)
+        try:
+            result = await _PROVIDERS[line.provider](image_bytes, notes, line)
+        except VisionError as error:
+            # A 422 is the model's real answer ("not food", "refused"). Asking the next
+            # provider would spend a second quota and risk inventing a meal it declined.
+            if error.status_code == 422:
+                logger.info("Meal analysis line %d/%d (%s) gave a final answer; not trying another provider.",
+                            position, total, label)
+                raise
+            # Provider and our own status only: provider error text may quote the user's
+            # photo or notes. The upstream status is on the httpx log line just above.
+            logger.warning("Meal analysis line %d/%d (%s) failed; surfacing as HTTP %d.%s",
+                           position, total, label, error.status_code,
+                           " Trying the next line." if position < total else "")
+            last_error = error
+            continue
+        if position > 1:
+            logger.warning("Meal analysis recovered on line %d/%d (%s).", position, total, label)
+        return result
+    logger.error("Meal analysis failed on every one of the %d configured line(s).", total)
+    raise last_error
+
+
 async def estimate_meal(image_bytes: bytes, notes: str, settings: Settings) -> dict[str, Any]:
-    """Use only the selected provider; never fall back to another billing account."""
-    if settings.ai_provider == "gemini":
-        return await _estimate_gemini(image_bytes, notes, settings)
-    return await _estimate_openai(image_bytes, notes, settings)
+    """Walk the configured provider chain; a provider is only skipped when it fails to answer."""
+    return await _run_chain(image_bytes, notes, settings)
 
 
 async def estimate_text_meal(description: str, settings: Settings) -> dict[str, Any]:
-    """Estimate a text-only meal using the same selected provider and strict schema."""
+    """Estimate a text-only meal using the same chain and strict schema."""
     if not description.strip() or len(description) > 2000:
         raise VisionError("Describe the food and portion size in 1–2,000 characters.")
-    if settings.ai_provider == "gemini":
-        return await _estimate_gemini(None, description, settings)
-    return await _estimate_openai(None, description, settings)
+    return await _run_chain(None, description, settings)
 
 
-async def _estimate_gemini(image_bytes: bytes | None, notes: str, settings: Settings) -> dict[str, Any]:
-    if not settings.gemini_api_key:
-        raise VisionError("Meal analysis isn't configured yet. Add a Gemini API key on the server, or log exact values with /log Meal name | calories.", 503)
+async def _estimate_gemini(image_bytes: bytes | None, notes: str, line: AiLine) -> dict[str, Any]:
     parts = [{"text": "Food and portion notes: " + json.dumps(notes[:2000])}]
     if image_bytes is not None:
         parts.append({"inlineData": {"mimeType": "image/jpeg", "data": base64.b64encode(image_bytes).decode("ascii")}})
@@ -170,9 +209,9 @@ async def _estimate_gemini(image_bytes: bytes | None, notes: str, settings: Sett
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10), follow_redirects=False) as client:
             response = await client.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent",
+                f"https://generativelanguage.googleapis.com/v1beta/models/{line.model}:generateContent",
                 # Keep credentials out of URLs and ordinary HTTP access logs.
-                headers={"x-goog-api-key": settings.gemini_api_key}, json=payload,
+                headers={"x-goog-api-key": line.api_key}, json=payload,
             )
     except httpx.HTTPError:
         raise VisionError("Gemini meal analysis is temporarily unavailable. Please retry or log the meal manually.", 503) from None
@@ -204,14 +243,12 @@ async def _estimate_gemini(image_bytes: bytes | None, notes: str, settings: Sett
         raise VisionError("Gemini returned an unreadable estimate. Please retry or log the meal manually.", 502) from None
 
 
-async def _estimate_openai(image_bytes: bytes | None, notes: str, settings: Settings) -> dict[str, Any]:
-    if not settings.openai_api_key:
-        raise VisionError("Meal analysis isn't configured yet. Add an OpenAI API key on the server, or log exact values with /log Meal name | calories.", 503)
+async def _estimate_openai(image_bytes: bytes | None, notes: str, line: AiLine) -> dict[str, Any]:
     content = [{"type": "input_text", "text": "Food and portion notes: " + json.dumps(notes[:2000])}]
     if image_bytes is not None:
         content.append({"type": "input_image", "image_url": "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii"), "detail": "high"})
     payload = {
-        "model": settings.openai_model,
+        "model": line.model,
         "store": False,
         "instructions": _INSTRUCTIONS if image_bytes is not None else _TEXT_INSTRUCTIONS,
         "input": [{
@@ -225,7 +262,7 @@ async def _estimate_openai(image_bytes: bytes | None, notes: str, settings: Sett
         async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as client:
             response = await client.post(
                 "https://api.openai.com/v1/responses",
-                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                headers={"Authorization": f"Bearer {line.api_key}"},
                 json=payload,
             )
     except httpx.HTTPError:
@@ -253,3 +290,80 @@ async def _estimate_openai(image_bytes: bytes | None, notes: str, settings: Sett
         return _validate_estimate(value)
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
         raise VisionError("Meal analysis returned an unreadable result. Please retry or enter the meal manually.", 502) from None
+
+
+# Plain JSON mode enforces no schema, so the downgraded request must state the shape itself.
+_GROQ_JSON_SHAPE = """
+Reply with one JSON object and nothing else. It must have exactly these keys: is_food (boolean),
+name (string), calories (number), protein (number), carbs (number), fat (number),
+confidence (one of "low", "medium", "high"), and notes (string). Add no other keys and no prose.
+"""
+
+
+async def _estimate_groq(image_bytes: bytes | None, notes: str, line: AiLine) -> dict[str, Any]:
+    instructions = _INSTRUCTIONS if image_bytes is not None else _TEXT_INSTRUCTIONS
+    content: list[dict[str, Any]] = [{"type": "text", "text": "Food and portion notes: " + json.dumps(notes[:2000])}]
+    if image_bytes is not None:
+        content.append({"type": "image_url", "image_url": {
+            "url": "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii")}})
+
+    def payload(strict: bool) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "model": line.model,
+            "messages": [
+                {"role": "system", "content": instructions if strict else instructions + _GROQ_JSON_SHAPE},
+                {"role": "user", "content": content},
+            ],
+            "temperature": 0,
+            "max_completion_tokens": 4096,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "meal_estimate", "strict": True, "schema": MEAL_SCHEMA},
+            } if strict else {"type": "json_object"},
+        }
+        # Qwen hides its <think> block only with this; Groq's gpt-oss models reject the parameter.
+        if not line.model.startswith("openai/gpt-oss"):
+            body["reasoning_format"] = "hidden"
+        return body
+
+    strict = True
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10), follow_redirects=False) as client:
+                response = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {line.api_key}"}, json=payload(strict),
+                )
+        except httpx.HTTPError:
+            raise VisionError("Groq meal analysis is temporarily unavailable. Please retry or log the meal manually.", 503) from None
+        # Groq's docs disagree on strict json_schema alongside images; renegotiate once, same model and account.
+        if response.status_code == 400 and strict:
+            logger.warning("Groq rejected the strict JSON schema for %s (HTTP 400); retrying in JSON object mode.", line.model)
+            strict = False
+            continue
+        break
+    if response.status_code in {401, 403}:
+        raise VisionError("Groq could not authenticate. Ask the server administrator to check the Groq API key.", 503)
+    if response.status_code == 429:
+        raise VisionError("Groq's request limit or quota has been reached. Try again later or log this meal manually.", 503)
+    if response.status_code >= 500:
+        raise VisionError("Groq is temporarily unavailable. Please retry or log the meal manually.", 503)
+    if response.status_code != 200:
+        raise VisionError("Groq meal analysis failed. Check the configured Groq model and account, or log the meal manually.", 502)
+    try:
+        body = response.json()
+        choices = body.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("No choice")
+        choice = choices[0]
+        message = choice.get("message") or {}
+        if message.get("refusal"):
+            raise VisionError("That meal couldn't be analyzed. Try a clear food photo or description or log the meal manually.")
+        if choice.get("finish_reason") != "stop":
+            raise VisionError("Groq did not finish the meal estimate. Please retry or log the meal manually.", 502)
+        return _validate_estimate(json.loads(message["content"]))
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        raise VisionError("Groq returned an unreadable estimate. Please retry or log the meal manually.", 502) from None
+
+
+_PROVIDERS = {"gemini": _estimate_gemini, "groq": _estimate_groq, "openai": _estimate_openai}

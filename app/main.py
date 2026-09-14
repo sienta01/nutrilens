@@ -5,6 +5,7 @@ import logging
 import secrets
 from contextlib import asynccontextmanager, suppress
 from datetime import date as Date, datetime, timedelta
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -20,7 +21,7 @@ from app.config import Settings
 from app.db import Database
 from app.models import LinkCode, LoginSession, Meal, User, utcnow
 from app.schemas import Login, MealCreate, MealType, MealUpdate, Register, SettingsUpdate, validate_logged_at
-from app.security import RateLimiter, hash_password, token_hash, verify_password
+from app.security import RateLimiter, RedactSecrets, hash_password, token_hash, verify_password
 from app.services import (
     add_photo_meal, can_view_image, day_meals, day_summary, delete_meal, image_file,
     iso, local_today, meal_dict, to_utc, user_dict,
@@ -29,6 +30,58 @@ from app.services import (
 COOKIE_NAME = "nutrilens_session"
 STATIC_DIR = Path(__file__).parent / "static"
 logger = logging.getLogger(__name__)
+
+
+def configure_logging(settings: Settings):
+    """Send app logs to the console and, unless LOG_FILE is empty, to a rotating file."""
+    root = logging.getLogger()
+    formatter = logging.Formatter("%(asctime)s %(levelname)-8s %(name)s: %(message)s")
+    # Handler-level, so a secret can never reach the console or the file on disk,
+    # whichever logger emitted it.
+    redaction = RedactSecrets(settings.telegram_bot_token)
+
+    def attached(kind: str) -> bool:
+        return any(getattr(handler, "_nutrilens", None) == kind for handler in root.handlers)
+
+    if not attached("stream"):
+        console = logging.StreamHandler()
+        console.setFormatter(formatter)
+        console.addFilter(redaction)
+        console._nutrilens = "stream"
+        root.addHandler(console)
+    # Raise only our own loggers; uvicorn and httpx keep whatever the server configured.
+    logging.getLogger("app").setLevel(settings.log_level)
+    root.setLevel(min(root.level or logging.WARNING, logging.getLevelName(settings.log_level)))
+    if not settings.log_file or attached("file"):
+        return
+    path = Path(settings.log_file)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rotating = RotatingFileHandler(
+            path, maxBytes=settings.log_max_bytes, backupCount=settings.log_backup_count, encoding="utf-8")
+    except OSError:
+        # A read-only or unwritable path must never stop the server from starting.
+        logger.warning("Could not open LOG_FILE %s; logging to the console only.", path)
+        return
+    rotating.setFormatter(formatter)
+    rotating.addFilter(redaction)
+    rotating._nutrilens = "file"
+    root.addHandler(rotating)
+    logger.info("Writing logs to %s (rotating at %d bytes, keeping %d).",
+                path.resolve(), settings.log_max_bytes, settings.log_backup_count)
+
+
+def log_ai_chain(settings: Settings):
+    """Record the failover order at startup. Providers and models only, never a key."""
+    chain = settings.ai_chain
+    if not chain:
+        logger.warning(
+            "Meal analysis is OFF: no AI provider is configured. Set AI_1_PROVIDER and AI_1_API_KEY "
+            "(or AI_PROVIDER plus that provider's key) in .env."
+        )
+        return
+    order = " -> ".join(f"{index}. {line.provider}:{line.model}" for index, line in enumerate(chain, start=1))
+    logger.info("Meal analysis failover chain (%d line(s)): %s", len(chain), order)
 
 
 def get_db(request: Request):
@@ -62,6 +115,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        configure_logging(settings)
+        log_ai_chain(settings)
         database.initialize()
         settings.upload_dir.mkdir(parents=True, exist_ok=True)
         worker = None
@@ -150,7 +205,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "telegram_reminders_available": bool(settings.telegram_bot_token and settings.telegram_polling),
             "telegram_bot_username": settings.telegram_bot_username,
             "ai_configured": settings.ai_configured, "demo_enabled": settings.demo_enabled,
-            "ai_provider": settings.ai_provider, "ai_provider_label": settings.ai_provider_label,
+            "ai_provider": settings.ai_primary_provider, "ai_provider_label": settings.ai_provider_label,
+            "ai_provider_labels": settings.ai_provider_labels,
             "photo_privacy_notice": settings.photo_privacy_notice,
         }
 

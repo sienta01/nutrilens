@@ -1,11 +1,32 @@
 import hashlib
 import hmac
+import logging
 import secrets
 import threading
 import time
 from collections import defaultdict, deque
 
 from fastapi import HTTPException
+
+
+class RedactSecrets(logging.Filter):
+    """Rewrite known secrets out of records. Attach to any logger or handler that writes them."""
+
+    def __init__(self, *values: str):
+        super().__init__()
+        self.values = [value for value in values if value]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self.values:
+            message = record.getMessage()
+            clean = message
+            for value in self.values:
+                clean = clean.replace(value, "[REDACTED]")
+            if clean != message:
+                # Collapse to a literal message; the arguments are already interpolated.
+                record.msg = clean
+                record.args = ()
+        return True
 
 
 def token_hash(raw: str) -> str:

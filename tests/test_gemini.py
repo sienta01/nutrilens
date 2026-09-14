@@ -50,7 +50,7 @@ async def test_gemini_image_schema_and_secret_in_header_only(monkeypatch):
     assert len(requests) == 1
     request = requests[0]
     assert request.url.host == "generativelanguage.googleapis.com"
-    assert request.url.path.endswith("gemini-2.5-flash-lite:generateContent")
+    assert request.url.path.endswith("gemini-flash-latest:generateContent")
     assert not request.url.query
     assert request.headers["x-goog-api-key"] == "fake-gemini-secret"
     body = json.loads(request.content)

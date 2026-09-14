@@ -30,7 +30,7 @@ Manual meal logging, goals, fasting schedules, progress charts, sharing, and exp
    TELEGRAM_POLLING=true
    AI_PROVIDER=gemini
    GEMINI_API_KEY=your_gemini_api_key
-   GEMINI_MODEL=gemini-2.5-flash-lite
+   GEMINI_MODEL=gemini-flash-latest
    ```
 
 3. Restart the server. Sign in on the website, open **Settings**, and choose **Connect Telegram**. Open the generated Telegram link and press **Start**. The link is single-use and expires after 10 minutes. Each website account can connect its own Telegram account to the same bot.
@@ -58,15 +58,32 @@ Bot commands:
 
 The bot receives updates through **long polling**, so local use does not need a public webhook or tunnel. Keep the Python server running. Use **exactly one app worker** when polling is enabled. If the bot has an existing webhook, explicitly remove it with Telegram's `deleteWebhook` method before enabling polling; the app reports conflicts and does not alter existing webhooks. This app has no public webhook endpoint.
 
-Photos can also be uploaded on the website. JPEG, PNG, and WebP are supported up to 10 MB and 25 megapixels; very large dimensions and animated images are rejected. Images are resized, rotated, stripped of metadata, and stored privately. The normalized photo/caption or meal description is sent only to the selected provider. The website and bot name that provider before analysis. Gemini free-tier content may be used by Google to improve its products; consult [Google’s data-use terms](https://ai.google.dev/gemini-api/terms). With OpenAI selected, requests use `store: false`, and its processing/retention terms still apply. There is no local AI model bundled with the app.
+Photos can also be uploaded on the website. JPEG, PNG, and WebP are supported up to 10 MB and 25 megapixels; very large dimensions and animated images are rejected. Images are resized, rotated, stripped of metadata, and stored privately. The normalized photo/caption or meal description is sent only to the providers you configure, in order, and only as far down that order as the first one that answers. The website and bot name every provider a photo may reach before analysis. Gemini free-tier content may be used by Google to improve its products; consult [Google’s data-use terms](https://ai.google.dev/gemini-api/terms). With OpenAI selected, requests use `store: false`, and its processing/retention terms still apply. There is no local AI model bundled with the app.
 
 Photo estimates cannot measure portions, oils, or hidden ingredients precisely. Every generated meal is labeled as an estimate with a confidence level and serving assumptions. Correct its numbers when needed. Failed analysis never creates a made-up meal. The selected model must be available to your provider account and support image input plus structured JSON output.
 
 ## Gemini free tier and provider choice
 
-The default `gemini-2.5-flash-lite` model supports image input and is listed with free-tier input/output usage in [Google’s pricing](https://ai.google.dev/gemini-api/docs/pricing#gemini-2.5-flash-lite). Create your key in [Google AI Studio](https://aistudio.google.com/apikey), select an eligible free-tier project, and check its current [rate limits](https://ai.google.dev/gemini-api/docs/rate-limits). Availability and quotas vary by model, project, and region. All users on this installation share the configured Google project's quota.
+The default `gemini-flash-latest` is a moving alias that always points at a current Flash model, which matters because Google retires pinned IDs — `gemini-2.5-flash-lite` is still listed by the models endpoint but now returns `404 … no longer available to new users` for keys created after its cutoff. Pin an exact ID instead if you need the model to stay fixed. Check [Google’s pricing](https://ai.google.dev/gemini-api/docs/pricing) for the free-tier status of whichever model the alias resolves to. Create your key in [Google AI Studio](https://aistudio.google.com/apikey), select an eligible free-tier project, and check its current [rate limits](https://ai.google.dev/gemini-api/docs/rate-limits). Availability and quotas vary by model, project, and region. All users on this installation share the configured Google project's quota.
 
-`AI_PROVIDER=gemini` chooses the API provider; it does **not** force Google to use free billing. If your Google project is on a paid tier, its API usage follows that project's billing. No fixed number of free photos is guaranteed. If quota is exhausted, the app reports the error and saves no meal. It never automatically switches providers or models. You can retry later or log the meal manually.
+`AI_PROVIDER=gemini` chooses the API provider; it does **not** force Google to use free billing. If your Google project is on a paid tier, its API usage follows that project's billing. No fixed number of free photos is guaranteed. If quota is exhausted on a single-provider install, the app reports the error and saves no meal. You can retry later or log the meal manually.
+
+### Failover across several providers
+
+Set numbered lines instead of `AI_PROVIDER` to try providers in order. Each line carries its own key, so a line that is out of quota hands the same photo to the next account:
+
+```dotenv
+AI_1_PROVIDER=groq
+AI_1_API_KEY=your_groq_api_key
+AI_2_PROVIDER=gemini
+AI_2_API_KEY=your_google_api_key
+AI_3_PROVIDER=openai
+AI_3_API_KEY=your_openai_api_key
+```
+
+`AI_n_MODEL` is optional and defaults to that provider's model setting. Two lines may name the same provider with different keys. Setting any `AI_n_*` line replaces `AI_PROVIDER` and its key entirely, and a line missing its provider or key is rejected at startup rather than at the first upload.
+
+The chain advances **only on failure** — exhausted quota, rejected credentials, an outage, or an unreadable reply. A provider that answers "this isn't food" or refuses the image has genuinely answered, so that result is final and no second account is charged. When every line fails, the last provider's error is what you see. The Settings page shows the configured order, and the photo privacy notice names every provider a photo may reach.
 
 To use OpenAI instead, set these values and restart:
 
@@ -76,7 +93,7 @@ OPENAI_API_KEY=your_openai_api_key
 OPENAI_MODEL=gpt-4.1-mini
 ```
 
-Only the chosen provider's key is required. OpenAI API usage is billed separately from a ChatGPT subscription. Existing meal records and account settings work with either provider. No new Python dependencies are needed for Gemini support.
+Only the keys actually named by your configuration are required. OpenAI API usage is billed separately from a ChatGPT subscription. Existing meal records and account settings work with either provider. No new Python dependencies are needed for Gemini support.
 
 ## Calorie plans and intermittent fasting
 
@@ -115,9 +132,18 @@ Existing installations keep their calorie targets in **Custom target** mode, wit
 | `TELEGRAM_BOT_TOKEN` | empty | BotFather token |
 | `TELEGRAM_BOT_USERNAME` | empty | Bot username, without `@` |
 | `TELEGRAM_POLLING` | `false` | Start the bot polling worker inside the server |
-| `AI_PROVIDER` | `gemini` | Select `gemini` or `openai`; no automatic fallback |
+| `LOG_LEVEL` | `INFO` | `CRITICAL`–`DEBUG`; `INFO` logs the failover chain and each provider attempt |
+| `LOG_FILE` | `data/nutrilens.log` | Rotating log file; empty disables file logging |
+| `LOG_MAX_BYTES` | `5242880` | Rotate once the log file reaches this size |
+| `LOG_BACKUP_COUNT` | `3` | Rotated files kept alongside the current one |
+| `AI_1_PROVIDER` … `AI_3_PROVIDER` | empty | Failover chain line: `gemini`, `groq`, or `openai` |
+| `AI_1_API_KEY` … `AI_3_API_KEY` | empty | That line's own credential and billing account |
+| `AI_1_MODEL` … `AI_3_MODEL` | provider default | Optional per-line model override |
+| `AI_PROVIDER` | `gemini` | Single-provider fallback, ignored when any `AI_n_*` line is set |
 | `GEMINI_API_KEY` | empty | Server-side Gemini API credential from Google AI Studio |
-| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Gemini model with image input and structured-output support |
+| `GEMINI_MODEL` | `gemini-flash-latest` | Gemini model with image input and structured-output support |
+| `GROQ_API_KEY` | empty | Optional server-side Groq API credential |
+| `GROQ_MODEL` | `qwen/qwen3.8-27b` | Image-capable Groq model with structured-output support |
 | `OPENAI_API_KEY` | empty | Optional server-side OpenAI API credential |
 | `OPENAI_MODEL` | `gpt-4.1-mini` | Image-capable model with structured-output support |
 
