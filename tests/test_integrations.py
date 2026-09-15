@@ -12,6 +12,7 @@ from sqlalchemy import select
 from app import vision
 from app.config import Settings
 from app.db import Database
+from app.main import DropPollingNoise, configure_logging
 from app.models import BotUpdate, Meal, User
 from app.telegram_bot import TelegramBot, TelegramError
 
@@ -400,3 +401,56 @@ async def test_each_telegram_account_logs_to_its_own_journal(bot_context):
     with database.session() as db:
         assert db.scalar(select(Meal.name).where(Meal.user_id == user_id)) == "Eggs"
         assert db.scalar(select(Meal.name).where(Meal.user_id == other_id)) == "Rice"
+
+
+def _httpx_record(message):
+    return logging.LogRecord("httpx", logging.INFO, "", 0, message, (), None)
+
+
+def _access_record(path, status):
+    return logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d',
+                             ("127.0.0.1:43744", "GET", path, "1.1", status), None)
+
+
+@pytest.mark.parametrize("record, kept", [
+    # The long poll and the health probe repeat every ~30s on an idle server.
+    (_httpx_record('HTTP Request: POST https://api.telegram.org/bot1234:secret/getUpdates "HTTP/1.1 200 OK"'), False),
+    (_httpx_record('HTTP Request: POST https://api.telegram.org/bot[REDACTED]/getUpdates "HTTP/1.1 200 OK"'), False),
+    (_access_record("/health", 200), False),
+    # A failing poll or probe is the whole reason someone reads these logs.
+    (_httpx_record('HTTP Request: POST https://api.telegram.org/bot[REDACTED]/getUpdates "HTTP/1.1 409 Conflict"'), True),
+    (_access_record("/health", 503), True),
+    # Provider attempts must survive: app.vision logs our mapped status, never the upstream one.
+    (_httpx_record('HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many"'), True),
+    (_httpx_record('HTTP Request: POST https://api.telegram.org/bot[REDACTED]/sendMessage "HTTP/1.1 200 OK"'), True),
+    (_access_record("/api/meals", 200), True),
+])
+def test_polling_noise_filter_drops_idle_chatter_only(record, kept):
+    assert DropPollingNoise().filter(record) is kept
+
+
+def test_configure_logging_installs_one_filter_and_debug_removes_it():
+    targets = [logging.getLogger("httpx"), logging.getLogger("uvicorn.access")]
+    saved = [list(target.filters) for target in targets]
+    # configure_logging() also lowers the root and "app" levels; a DEBUG call here must not
+    # leak that into the rest of the session.
+    root_level, app_level = logging.getLogger().level, logging.getLogger("app").level
+    try:
+        def installed():
+            return [len([f for f in t.filters if isinstance(f, DropPollingNoise)]) for t in targets]
+
+        base = dict(_env_file=None, log_file="", telegram_bot_token="")
+        configure_logging(Settings(**base, log_level="INFO"))
+        configure_logging(Settings(**base, log_level="INFO"))
+        assert installed() == [1, 1], "repeated create_app() must not stack filters"
+
+        configure_logging(Settings(**base, log_level="DEBUG"))
+        assert installed() == [0, 0], "DEBUG means show everything"
+    finally:
+        for target, original in zip(targets, saved):
+            for extra in list(target.filters):
+                target.removeFilter(extra)
+            for original_filter in original:
+                target.addFilter(original_filter)
+        logging.getLogger().setLevel(root_level)
+        logging.getLogger("app").setLevel(app_level)

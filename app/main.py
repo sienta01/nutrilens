@@ -2,6 +2,7 @@ import asyncio
 import csv
 import io
 import logging
+import re
 import secrets
 from contextlib import asynccontextmanager, suppress
 from datetime import date as Date, datetime, timedelta
@@ -27,6 +28,29 @@ from app.services import (
     iso, local_today, meal_dict, to_utc, user_dict,
 )
 
+class DropPollingNoise(logging.Filter):
+    """Drop the two successful lines that repeat forever on an idle server.
+
+    The Telegram long poll and the container health probe each land every ~30s, which
+    buries real events and churns the rotating log file. Only 2xx responses are dropped:
+    a failing poll or an unhealthy probe is exactly what someone is looking for. httpx is
+    filtered rather than silenced because a provider attempt's upstream status is only
+    ever recorded on its httpx line -- app.vision logs our mapped status, never theirs.
+    """
+
+    # Matches whether or not the bot token has been redacted out of the URL yet.
+    _POLL = re.compile(r'api\.telegram\.org/bot[^/\s]+/getUpdates.*"HTTP/[\d.]+ 2\d\d')
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "uvicorn.access":
+            args = record.args
+            # uvicorn logs (client, method, path, http_version, status) as args.
+            if isinstance(args, tuple) and len(args) == 5:
+                return not (args[2] == "/health" and str(args[4]).startswith("2"))
+            return True
+        return not self._POLL.search(record.getMessage())
+
+
 COOKIE_NAME = "nutrilens_session"
 STATIC_DIR = Path(__file__).parent / "static"
 logger = logging.getLogger(__name__)
@@ -51,6 +75,17 @@ def configure_logging(settings: Settings):
         root.addHandler(console)
     # Raise only our own loggers; uvicorn and httpx keep whatever the server configured.
     logging.getLogger("app").setLevel(settings.log_level)
+    # Idle chatter is dropped on the logger itself, so the poll and the health probe never
+    # reach either handler. DEBUG means "show me everything", so it removes the filter --
+    # including on a later create_app() in the same process.
+    for name in ("httpx", "uvicorn.access"):
+        target = logging.getLogger(name)
+        installed = [f for f in target.filters if isinstance(f, DropPollingNoise)]
+        if settings.log_level == "DEBUG":
+            for existing in installed:
+                target.removeFilter(existing)
+        elif not installed:
+            target.addFilter(DropPollingNoise())
     root.setLevel(min(root.level or logging.WARNING, logging.getLevelName(settings.log_level)))
     if not settings.log_file or attached("file"):
         return

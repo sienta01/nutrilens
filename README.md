@@ -133,7 +133,7 @@ Existing installations keep their calorie targets in **Custom target** mode, wit
 | `TELEGRAM_BOT_TOKEN` | empty | BotFather token |
 | `TELEGRAM_BOT_USERNAME` | empty | Bot username, without `@` |
 | `TELEGRAM_POLLING` | `false` | Start the bot polling worker inside the server |
-| `LOG_LEVEL` | `INFO` | `CRITICAL`–`DEBUG`; `INFO` logs the failover chain and each provider attempt |
+| `LOG_LEVEL` | `INFO` | `CRITICAL`–`DEBUG`; see [Log levels](#log-levels) below |
 | `LOG_FILE` | `data/nutrilens.log` | Rotating log file; empty disables file logging |
 | `LOG_MAX_BYTES` | `5242880` | Rotate once the log file reaches this size |
 | `LOG_BACKUP_COUNT` | `3` | Rotated files kept alongside the current one |
@@ -149,6 +149,25 @@ Existing installations keep their calorie targets in **Custom target** mode, wit
 | `OPENAI_MODEL` | `gpt-4.1-mini` | Image-capable model with structured-output support |
 
 Settings load from `.env` and environment variables, with environment variables taking precedence. Never put API keys in the frontend. `.env`, local databases, uploads, and the virtual environment are ignored by Git.
+
+### Log levels
+
+`LOG_LEVEL` sets the level of the application's own `app` logger. Each level includes everything below it in this table.
+
+| Level | What the application logs |
+| --- | --- |
+| `ERROR` | Something stopped: every configured AI line failed, a Telegram polling conflict or rejected token, a fasting reminder check that raised |
+| `WARNING` | Degraded but still running: one AI line failed and the chain moved to the next, Groq's strict-schema downgrade, an unwritable `LOG_FILE`, polling enabled with no token, a meal photo that could not be deleted from storage |
+| `INFO` (default) | Normal operation: the failover chain at startup, one line per provider attempt naming the provider and model, and whether the chain recovered or gave a final answer |
+| `DEBUG` | Adds no messages of its own. It removes the polling-noise filter, so successful Telegram `getUpdates` polls and `GET /health` probes reappear |
+
+Three behaviours are worth knowing before you pick a level to quieten things down:
+
+- **Uvicorn's access log ignores `LOG_LEVEL` completely.** Uvicorn pins `uvicorn.access` at `INFO` with `propagate: false`, so request lines keep appearing at every setting, including `CRITICAL`. The only ones suppressed are successful `/health` probes, and that is the filter's doing rather than the level's.
+- **`WARNING` and below also silence `httpx`.** That logger has no level of its own, so it follows the root level, which tracks `LOG_LEVEL` down to `INFO` but no lower. Since a provider attempt's upstream status is recorded *only* on its httpx line, dropping to `WARNING` leaves AI failures showing our mapped status with no upstream status anywhere. Prefer `INFO` while diagnosing provider problems.
+- **`ERROR` and `CRITICAL` still let third-party warnings through.** The root logger is never raised above `WARNING`, so libraries continue to report at that level even when the app itself has gone quiet.
+
+Keys, tokens, and photo bytes are never logged at any level. Provider error text is never surfaced, and `RedactSecrets` rewrites the bot token out of every record reaching the console or the file.
 
 ## Hosting
 
@@ -179,11 +198,67 @@ Then `docker compose up -d --force-recreate` — Compose does not reliably notic
 
 `BIND_ADDR=0.0.0.0` also covers a VPN interface such as Tailscale, so the same port answers on the host's VPN address with no extra configuration. Traffic over a WireGuard-based VPN is already encrypted end to end, which makes plain HTTP over that address a reasonable remote path; a TLS-terminating proxy in front would add a hostname and a padlock rather than confidentiality you lack. Note that such a proxy also changes the browser's `Origin` to `https://`, which the mutation check rejects unless `APP_URL` matches it exactly — and matching it re-triggers the `COOKIE_SECURE` behaviour above, breaking plain-IP access. Pick one or the other.
 
-On the LAN segment itself this is unencrypted, session cookie included, so use it only on a network you trust and do not port-forward it. `APP_URL` is also what the Telegram bot puts in its messages, so a LAN address there produces links that work at home and fail elsewhere.
+**If Docker runs inside WSL2, the VPN address is the WSL distro's, not Windows'.** A VPN client running inside the distro registers as its own node with its own address, separate from the one the Windows host has — they are two peers on the same network, not one machine with one address. The container binds inside the distro's network namespace, so it answers on the distro's VPN address and the Windows host's VPN address times out. WSL2's mirrored networking mode adds to the confusion by sharing the host's *physical* adapter, so the LAN address works while the VPN address does not: mirroring covers Ethernet and Wi-Fi, not the virtual adapter the VPN creates. Check which address is listening before assuming the port is blocked:
+
+```shell
+curl http://<windows-host-vpn-ip>:8000/health
+curl http://<wsl-distro-vpn-ip>:8000/health
+```
+
+On the LAN segment itself this is unencrypted, session cookie included, so use it only on a network you trust and do not port-forward it. `APP_URL` is also what the Telegram bot puts in its messages, so a LAN address there produces links that work at home and fail elsewhere. If the host is on a VPN, prefer its VPN hostname there — it resolves from your devices in both places, and browsing by LAN address still works regardless, because the mutation check accepts whatever `Host` the request carries.
 
 The app uses scrypt password hashes, random server-side sessions with hashed tokens, HttpOnly/SameSite cookies, same-origin mutation checks, upload validation, authenticated photo delivery, and account ownership checks. Login and photo requests have single-process limits. For larger public deployments, add a shared rate limiter, database migrations, a password recovery flow, and operational monitoring. SQLite is suitable for a small shared installation; multi-replica deployments need additional coordination and a shared database/storage service.
 
-Back up the database and uploads together while the application is stopped, or use SQLite's backup API for an online database backup. Copying only a live `.db` file can miss changes held in WAL files. Provider tokens and database backups should be handled as secrets.
+### Data, rebuilds, and backups
+
+The container keeps nothing of its own. `compose.yaml` points both the database and the photo directory at `/app/data`, which is the named volume `nutrilens-data`:
+
+```yaml
+environment:
+  DATABASE_URL: sqlite:////app/data/nutrilens.db
+  UPLOAD_DIR: /app/data/uploads
+volumes:
+  - nutrilens-data:/app/data
+```
+
+A named volume is independent of both the image and the container, so rebuilding is non-destructive. These all keep your data:
+
+```shell
+docker compose up -d --build
+docker compose up -d --force-recreate
+docker compose down
+docker compose restart
+```
+
+`down` on its own removes containers and networks and deliberately leaves named volumes alone. These delete the database and every uploaded photo:
+
+```shell
+docker compose down -v
+docker volume rm <project>_nutrilens-data
+docker system prune -a --volumes
+```
+
+`docker compose down -v` is the one to be careful with: it is a single character away from the safe command and is freely suggested in troubleshooting threads.
+
+Note that the `environment:` block above is what makes any of this persistent. `.env` ships a *relative* `DATABASE_URL`, which inside a container would resolve into the writable layer and be lost on every recreate; Compose gives `environment:` precedence over `env_file:`, so the absolute path wins. Leave those two lines in place.
+
+To back up, find the volume's real name first — Compose prefixes it with the project directory:
+
+```shell
+docker volume ls | grep nutrilens
+```
+
+Back up the database and uploads together while the application is stopped, or use SQLite's backup API for an online copy. Copying only a live `.db` file can miss changes held in WAL files. The API is available through the bundled Python, so no extra tooling is needed:
+
+```shell
+docker compose exec nutrilens python -c "import sqlite3; s=sqlite3.connect('/app/data/nutrilens.db'); d=sqlite3.connect('/tmp/backup.db'); s.backup(d); d.close(); s.close()"
+docker compose cp nutrilens:/tmp/backup.db ./nutrilens-backup.db
+docker compose cp nutrilens:/app/data/uploads ./nutrilens-uploads
+```
+
+The snapshot is written to `/tmp` rather than `/app/data` on purpose: a copy left inside the volume would be picked up by the next backup, and by the one after that.
+
+Provider tokens and database backups should be handled as secrets.
 
 ## Development and verification
 
