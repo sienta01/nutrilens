@@ -125,9 +125,10 @@ Existing installations keep their calorie targets in **Custom target** mode, wit
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `APP_URL` | `http://localhost:8000` | Website address used in bot messages and request checks |
+| `BIND_ADDR` | `127.0.0.1` | Compose only: address the published port binds to; `0.0.0.0` exposes it to the LAN |
 | `DATABASE_URL` | `sqlite:///./data/nutrilens.db` | Persistent SQLAlchemy database URL |
 | `UPLOAD_DIR` | `./data/uploads` | Private meal photo directory |
-| `COOKIE_SECURE` | `false` | Set `true` behind HTTPS; HTTPS `APP_URL` enables it automatically |
+| `COOKIE_SECURE` | `false` | Set `true` behind HTTPS; an `https://` `APP_URL` forces it on, overriding this value |
 | `DEMO_ENABLED` | `true` | Sample workspaces, automatically disabled for a public `APP_URL` |
 | `TELEGRAM_BOT_TOKEN` | empty | BotFather token |
 | `TELEGRAM_BOT_USERNAME` | empty | Bot username, without `@` |
@@ -159,7 +160,26 @@ An optional container setup is included:
 docker compose up --build -d
 ```
 
-It reads your `.env`, binds port 8000 on localhost, and stores the database and photos in a persistent Docker volume. Put your reverse proxy in front of that port. The initial schema is created at startup. This version includes an additive startup migration for calorie plans and fasting preferences in `app/migrations.py`. Future schema changes still need explicit migrations; no general migration framework is included.
+It reads your `.env`, binds port 8000 on localhost, and stores the database and photos in a persistent Docker volume. Put your reverse proxy in front of that port, or see [Reaching it from other devices](#reaching-it-from-other-devices) to open it to your network instead.
+
+The initial schema is created at startup. This version includes an additive startup migration for calorie plans and fasting preferences in `app/migrations.py`. Future schema changes still need explicit migrations; no general migration framework is included.
+
+### Reaching it from other devices
+
+The published port is loopback-only by default, so the app answers on the Docker host and nowhere else. That is correct behind a reverse proxy on the same host, and it is why a machine on the same LAN gets a refused connection. To reach it from other devices without a proxy:
+
+```shell
+BIND_ADDR=0.0.0.0
+APP_URL=http://<docker-host-lan-ip>:8000
+```
+
+Then `docker compose up -d --force-recreate` — Compose does not reliably notice edits to the *contents* of `env_file`, so a plain `up -d` can leave the previous `APP_URL` baked into the running container. Open port 8000 in the Docker host's firewall.
+
+**Keep `APP_URL` on `http://` for this.** An `https://` value forces `COOKIE_SECURE=true` through the `model_validator` in `app/config.py`, which overrides `COOKIE_SECURE` in `.env` rather than merging with it. The browser then withholds the session cookie over plain HTTP, and login fails by silently returning you to the login screen with nothing logged as an error.
+
+`BIND_ADDR=0.0.0.0` also covers a VPN interface such as Tailscale, so the same port answers on the host's VPN address with no extra configuration. Traffic over a WireGuard-based VPN is already encrypted end to end, which makes plain HTTP over that address a reasonable remote path; a TLS-terminating proxy in front would add a hostname and a padlock rather than confidentiality you lack. Note that such a proxy also changes the browser's `Origin` to `https://`, which the mutation check rejects unless `APP_URL` matches it exactly — and matching it re-triggers the `COOKIE_SECURE` behaviour above, breaking plain-IP access. Pick one or the other.
+
+On the LAN segment itself this is unencrypted, session cookie included, so use it only on a network you trust and do not port-forward it. `APP_URL` is also what the Telegram bot puts in its messages, so a LAN address there produces links that work at home and fail elsewhere.
 
 The app uses scrypt password hashes, random server-side sessions with hashed tokens, HttpOnly/SameSite cookies, same-origin mutation checks, upload validation, authenticated photo delivery, and account ownership checks. Login and photo requests have single-process limits. For larger public deployments, add a shared rate limiter, database migrations, a password recovery flow, and operational monitoring. SQLite is suitable for a small shared installation; multi-replica deployments need additional coordination and a shared database/storage service.
 

@@ -1,8 +1,10 @@
 services:
   nutrilens:
     build: .
+    # Loopback-only by default, for a reverse proxy on the same host.
+    # Set BIND_ADDR=0.0.0.0 in .env to reach it from the LAN instead.
     ports:
-      - "127.0.0.1:8000:8000"
+      - "${BIND_ADDR:-127.0.0.1}:8000:8000"
     env_file: .env
     environment:
       DATABASE_URL: sqlite:////app/data/nutrilens.db
