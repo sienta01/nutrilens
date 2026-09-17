@@ -4,7 +4,7 @@ import re
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import create_model, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROVIDER_LABELS = {"gemini": "Google Gemini", "groq": "Groq", "openai": "OpenAI"}
@@ -14,8 +14,20 @@ PROVIDER_LABELS = {"gemini": "Google Gemini", "groq": "Groq", "openai": "OpenAI"
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?")
 _GEMINI_MODEL = re.compile(r"gemini-[A-Za-z0-9._-]+")
 
-# How many AI_n_* failover lines are read from the environment.
-AI_LINES = (1, 2, 3)
+# How many AI_n_* failover lines are read from the environment. Lines left unset
+# are skipped, so the chain is exactly as long as the environment defines; raise
+# this ceiling if you ever need more than eight. The fields are declared from it
+# rather than discovered at import, so a line behaves the same whether it arrives
+# from .env, from a real environment variable in the container, or from a test's
+# keyword argument.
+AI_LINE_LIMIT = 8
+AI_LINES = tuple(range(1, AI_LINE_LIMIT + 1))
+AI_LINE_PARTS = ("provider", "api_key", "model")
+
+
+def _line_fields(*parts: str) -> tuple[str, ...]:
+    """Field names for the given parts of every line: ai_1_provider, ai_2_provider, ..."""
+    return tuple(f"ai_{index}_{part}" for part in parts for index in AI_LINES)
 
 
 @dataclass(frozen=True)
@@ -60,7 +72,15 @@ def _build_chain(settings: "Settings") -> list[AiLine]:
     return [AiLine(settings.ai_provider, legacy_key, getattr(settings, f"{settings.ai_provider}_model"))]
 
 
-class Settings(BaseSettings):
+# One str field per line part, so AI_LINE_LIMIT is the only place the count lives.
+_AiLineFields = create_model(
+    "_AiLineFields",
+    __base__=BaseSettings,
+    **{name: (str, "") for name in _line_fields(*AI_LINE_PARTS)},
+)
+
+
+class Settings(_AiLineFields):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_url: str = "http://localhost:8000"
@@ -84,16 +104,7 @@ class Settings(BaseSettings):
     groq_model: str = "qwen/qwen3.8-27b"
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"
-    # Ordered failover lines. Set these to try several providers or several keys in turn.
-    ai_1_provider: str = ""
-    ai_1_api_key: str = ""
-    ai_1_model: str = ""
-    ai_2_provider: str = ""
-    ai_2_api_key: str = ""
-    ai_2_model: str = ""
-    ai_3_provider: str = ""
-    ai_3_api_key: str = ""
-    ai_3_model: str = ""
+    # Ordered failover lines (ai_1_* through ai_8_*) are declared by _AiLineFields above.
     telegram_bot_token: str = ""
     telegram_bot_username: str = ""
     telegram_polling: bool = False
@@ -149,7 +160,7 @@ class Settings(BaseSettings):
     def valid_model_id(cls, value: str, info) -> str:
         return _clean_model(info.field_name.removesuffix("_model"), value)
 
-    @field_validator("ai_1_provider", "ai_2_provider", "ai_3_provider")
+    @field_validator(*_line_fields("provider"))
     @classmethod
     def valid_line_provider(cls, value: str) -> str:
         value = value.strip().lower()
@@ -157,7 +168,7 @@ class Settings(BaseSettings):
             raise ValueError(f"Unknown AI provider. Choose one of: {', '.join(PROVIDER_LABELS)}.")
         return value
 
-    @field_validator("ai_1_api_key", "ai_2_api_key", "ai_3_api_key", "ai_1_model", "ai_2_model", "ai_3_model")
+    @field_validator(*_line_fields("api_key", "model"))
     @classmethod
     def strip_line_value(cls, value: str) -> str:
         return value.strip()

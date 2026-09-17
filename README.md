@@ -81,6 +81,8 @@ AI_3_PROVIDER=openai
 AI_3_API_KEY=your_openai_api_key
 ```
 
+Up to eight lines are read (`AI_1_*` through `AI_8_*`); numbers you skip or leave blank are simply passed over, so the chain is as long as your `.env` makes it. A line numbered beyond the eighth is ignored without complaint — raise `AI_LINE_LIMIT` in [app/config.py](app/config.py) if you need more.
+
 `AI_n_MODEL` is optional and defaults to that provider's model setting. Two lines may name the same provider with different keys. Setting any `AI_n_*` line replaces `AI_PROVIDER` and its key entirely, and a line missing its provider or key is rejected at startup rather than at the first upload.
 
 The chain advances **only on failure** — exhausted quota, rejected credentials, an outage, or an unreadable reply. A provider that answers "this isn't food" or refuses the image has genuinely answered, so that result is final and no second account is charged. When every line fails, the last provider's error is what you see. The Settings page shows the configured order, and the photo privacy notice names every provider a photo may reach.
@@ -137,9 +139,9 @@ Existing installations keep their calorie targets in **Custom target** mode, wit
 | `LOG_FILE` | `data/nutrilens.log` | Rotating log file; empty disables file logging |
 | `LOG_MAX_BYTES` | `5242880` | Rotate once the log file reaches this size |
 | `LOG_BACKUP_COUNT` | `3` | Rotated files kept alongside the current one |
-| `AI_1_PROVIDER` … `AI_3_PROVIDER` | empty | Failover chain line: `gemini`, `groq`, or `openai` |
-| `AI_1_API_KEY` … `AI_3_API_KEY` | empty | That line's own credential and billing account |
-| `AI_1_MODEL` … `AI_3_MODEL` | provider default | Optional per-line model override |
+| `AI_1_PROVIDER` … `AI_8_PROVIDER` | empty | Failover chain line: `gemini`, `groq`, or `openai` |
+| `AI_1_API_KEY` … `AI_8_API_KEY` | empty | That line's own credential and billing account |
+| `AI_1_MODEL` … `AI_8_MODEL` | provider default | Optional per-line model override |
 | `AI_PROVIDER` | `gemini` | Single-provider fallback, ignored when any `AI_n_*` line is set |
 | `GEMINI_API_KEY` | empty | Server-side Gemini API credential from Google AI Studio |
 | `GEMINI_MODEL` | `gemini-flash-latest` | Gemini model with image input and structured-output support |
