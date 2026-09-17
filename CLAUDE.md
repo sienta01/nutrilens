@@ -90,6 +90,7 @@ Auth is server-side sessions: a random token in an HttpOnly cookie, only its SHA
 - The `bot_updates` table is the durable offset checkpoint — never reconstruct an offset from `MAX(update_id)`, since Telegram resets IDs after a week of inactivity.
 - `Meal.telegram_update_id` is `UNIQUE`, so a redelivered photo/text message re-sends the receipt instead of creating a second meal.
 - `/undo` commits the meal deletion and the `BotUpdate` marker in one transaction, so a retried response can't delete the next meal.
+- `_send_receipt()` reads `Meal.ai_provider` / `Meal.ai_model` rather than the estimate that produced them, so a redelivered photo re-sends a receipt naming the same model. Both are `NULL` for manual `/log` entries and for rows written before the column existed; the receipt drops the segment instead of guessing.
 
 Group chats are ignored outright (`chat.type != "private"`, or chat id ≠ sender id). Errors are logged by exception *type* only and a logging filter redacts the bot token, because Telegram URLs and network exceptions carry the token and private message content.
 
@@ -113,7 +114,7 @@ Demo workspaces ([app/demo.py](app/demo.py)) create a fresh `demo_group` UUID wi
 
 ### Schema changes
 
-`Database.initialize()` runs `create_all()` and then `migrations.upgrade()`. [app/migrations.py](app/migrations.py) is an additive-only `USER_COLUMNS` dict of fixed, application-owned DDL applied when a column is missing — repeatable and non-destructive. When you add a column to `User`, add it to both [app/models.py](app/models.py) and that dict; anything beyond additive column adds (renames, drops, backfills, other tables) needs a real migration story that does not exist yet.
+`Database.initialize()` runs `create_all()` and then `migrations.upgrade()`. [app/migrations.py](app/migrations.py) is an additive-only `TABLE_COLUMNS` map — `{"users": USER_COLUMNS, "meals": MEAL_COLUMNS}` — of fixed, application-owned DDL applied when a column is missing, repeatable and non-destructive. When you add a column to a mapped class, add it to both [app/models.py](app/models.py) and the dict for that table; a table with no entry there gets nothing but `create_all()`, which never alters an existing table. Anything beyond additive column adds (renames, drops, backfills) still needs a real migration story that does not exist yet.
 
 ### Frontend
 

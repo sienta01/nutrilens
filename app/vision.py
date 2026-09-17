@@ -177,6 +177,8 @@ async def _run_chain(image_bytes: bytes | None, notes: str, settings: Settings) 
             continue
         if position > 1:
             logger.warning("Meal analysis recovered on line %d/%d (%s).", position, total, label)
+        # Which line answered, for the receipt and for tracing a bad number later.
+        result["ai_provider"], result["ai_model"] = line.provider, line.model
         return result
     logger.error("Meal analysis failed on every one of the %d configured line(s).", total)
     raise last_error

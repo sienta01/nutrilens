@@ -173,6 +173,7 @@ async def add_photo_meal(
         meal_type=meal_type, logged_at=to_utc(logged_at, user),
         notes=(notes + ("\n" if notes else "") + result.get("notes", ""))[:2000],
         source=source, estimated=True, confidence=result["confidence"],
+        ai_provider=result.get("ai_provider"), ai_model=result.get("ai_model"),
         image_path=filename, telegram_update_id=telegram_update_id,
     )
     try:
@@ -217,7 +218,8 @@ async def add_text_meal(
         meal = Meal(user_id=user.id, name=result["name"],
                     **{key: result[key] for key in NUTRIENTS},
                     notes=(description + "\n" + result["notes"])[:2000],
-                    estimated=True, confidence=result["confidence"])
+                    estimated=True, confidence=result["confidence"],
+                    ai_provider=result.get("ai_provider"), ai_model=result.get("ai_model"))
     meal.logged_at = to_utc(logged_at, user)
     meal.meal_type = meal_type
     meal.source = "telegram"

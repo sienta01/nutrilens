@@ -20,6 +20,7 @@ from fastapi import HTTPException
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 
+from app.config import PROVIDER_LABELS
 from app.models import BotUpdate, LinkCode, Meal, User
 from app.security import RateLimiter, RedactSecrets, token_hash
 from app.vision import VisionError
@@ -376,8 +377,15 @@ class TelegramBot:
                 logger.warning("Could not remove a deleted meal photo from storage.")
 
     async def _send_receipt(self, chat_id: str, meal: Meal) -> None:
-        detail = (f"{'Photo' if meal.image_path else 'Text'} estimate · {meal.confidence or 'low'} confidence."
-                  if meal.estimated else "Logged using your supplied values.")
+        if not meal.estimated:
+            detail = "Logged using your supplied values."
+        else:
+            detail = f"{'Photo' if meal.image_path else 'Text'} estimate · {meal.confidence or 'low'} confidence"
+            # Name the line that actually answered; blank on pre-upgrade rows.
+            if meal.ai_model:
+                label = PROVIDER_LABELS.get(meal.ai_provider or "")
+                detail += f" · {label} ({meal.ai_model})" if label else f" · {meal.ai_model}"
+            detail += "."
         await self._send(chat_id, (
             f"Logged {meal.name}\n"
             f"{'≈ ' if meal.estimated else ''}{meal.calories:,.0f} kcal\n"

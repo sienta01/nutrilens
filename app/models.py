@@ -64,6 +64,9 @@ class Meal(Base):
     source: Mapped[str] = mapped_column(String(20), default="manual")
     estimated: Mapped[bool] = mapped_column(Boolean, default=False)
     confidence: Mapped[str | None] = mapped_column(String(10))
+    # Which chain line actually answered; NULL for manual entries and pre-upgrade rows.
+    ai_provider: Mapped[str | None] = mapped_column(String(20))
+    ai_model: Mapped[str | None] = mapped_column(String(100))
     image_path: Mapped[str | None] = mapped_column(String(200))
     telegram_update_id: Mapped[int | None] = mapped_column(Integer, unique=True)
 
