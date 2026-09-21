@@ -24,8 +24,8 @@ from app.models import LinkCode, LoginSession, Meal, User, utcnow
 from app.schemas import Login, MealCreate, MealType, MealUpdate, Register, SettingsUpdate, validate_logged_at
 from app.security import RateLimiter, RedactSecrets, hash_password, token_hash, verify_password
 from app.services import (
-    add_photo_meal, can_view_image, day_meals, day_summary, delete_meal, image_file,
-    iso, local_today, meal_dict, to_utc, user_dict,
+    SHARED_MEAL_DAYS, add_photo_meal, can_view_image, day_meals, day_summary, delete_meal,
+    image_file, iso, meal_dict, shared_meals, to_utc, user_dict,
 )
 
 class DropPollingNoise(logging.Filter):
@@ -391,6 +391,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/community")
     def community(limit: int = Query(24, ge=1, le=100), offset: int = Query(0, ge=0),
+                  days: int = Query(SHARED_MEAL_DAYS, ge=1, le=30),
                   user: User = Depends(current_user), db: Session = Depends(get_db)):
         query = select(User).where(User.share_progress.is_(True), User.is_demo == user.is_demo)
         if user.is_demo:
@@ -398,8 +399,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         members = db.scalars(query.order_by(User.display_name, User.id).limit(limit).offset(offset))
         profiles = []
         for member in members:
-            summary = day_summary(db, member)
-            shared_meals = day_meals(db, member, local_today(member)) if member.share_meals else []
+            summary = day_summary(db, member, None, days)
+            shared = shared_meals(db, member, days) if member.share_meals else []
             profiles.append({
                 "id": member.id, "display_name": member.display_name,
                 "initials": "".join(part[0] for part in member.display_name.split()[:2]).upper(),
@@ -407,9 +408,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "daily_calorie_goal": member.daily_calorie_goal, "weekly": summary["weekly"],
                 "date": summary["date"], "timezone": member.timezone,
                 "share_meals": member.share_meals,
-                "meals": [meal_dict(meal, shared=True) for meal in shared_meals],
+                "meals": shared,
             })
-        return {"users": profiles}
+        return {"users": profiles, "days": days}
 
     @app.post("/api/telegram/link")
     def telegram_link(user: User = Depends(current_user), db: Session = Depends(get_db)):
