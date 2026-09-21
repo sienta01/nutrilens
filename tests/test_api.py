@@ -314,6 +314,34 @@ def test_progress_and_meal_sharing_require_separate_opt_ins_and_revoke(client, s
     assert owner_id not in {user["id"] for user in community(second_client)}
 
 
+def test_shared_meals_span_recent_days_and_carry_their_local_day(client, second_client):
+    register(client)
+    owner_id = current_user(client)["id"]
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    create_meal(client, name="Bowl from today")
+    create_meal(client, name="Bowl from three days ago", logged_at=(now - timedelta(days=3)).isoformat())
+    create_meal(client, name="Bowl from three weeks ago", logged_at=(now - timedelta(days=21)).isoformat())
+    assert client.patch("/api/me", json={"share_progress": True, "share_meals": True}).status_code == 200
+    register(second_client, email="blair@example.com", display_name="Blair")
+
+    shared = next(user for user in community(second_client) if user["id"] == owner_id)
+    names = [meal["name"] for meal in shared["meals"]]
+    assert names == ["Bowl from today", "Bowl from three days ago"]
+    assert shared["meals"][0]["date"] == shared["date"]
+    assert shared["meals"][1]["date"] == (now - timedelta(days=3)).date().isoformat()
+    assert all(meal["notes"] == "" and meal["source"] == "shared" for meal in shared["meals"])
+
+    response = second_client.get("/api/community", params={"days": 30})
+    assert response.status_code == 200, response.text
+    assert response.json()["days"] == 30
+    wider = next(user for user in response.json()["users"] if user["id"] == owner_id)
+    assert "Bowl from three weeks ago" in {meal["name"] for meal in wider["meals"]}
+    assert "One bowl" not in response.text
+
+    assert client.patch("/api/me", json={"share_meals": False}).status_code == 200
+    assert second_client.get("/api/community", params={"days": 30}).text.count("Bowl from") == 0
+
+
 def test_meal_sharing_alone_does_not_publish_account(client, second_client):
     register(client)
     owner_id = current_user(client)["id"]

@@ -11,6 +11,9 @@ from app.models import Meal, User, utcnow
 from app.planning import fasting_status, goal_plan
 
 NUTRIENTS = ("calories", "protein", "carbs", "fat")
+# How far back shared meals reach, and the cap on one profile's feed so a poll stays small.
+SHARED_MEAL_DAYS = 7
+SHARED_MEAL_LIMIT = 60
 
 
 def iso(value: datetime) -> str:
@@ -65,11 +68,29 @@ def day_bounds(date: Date, zone: str) -> tuple[datetime, datetime]:
     return start, end
 
 
-def day_meals(db: Session, user: User, date: Date) -> list[Meal]:
-    start, end = day_bounds(date, user.timezone)
+def meal_date(meal: Meal, zone: ZoneInfo) -> Date:
+    return meal.logged_at.replace(tzinfo=timezone.utc).astimezone(zone).date()
+
+
+def range_meals(db: Session, user: User, first: Date, last: Date) -> list[Meal]:
+    """Meals logged between two local calendar days, both inclusive, newest first."""
+    start, _ = day_bounds(first, user.timezone)
+    _, end = day_bounds(last, user.timezone)
     return list(db.scalars(select(Meal).where(
         Meal.user_id == user.id, Meal.logged_at >= start, Meal.logged_at < end
     ).order_by(Meal.logged_at.desc(), Meal.id)))
+
+
+def day_meals(db: Session, user: User, date: Date) -> list[Meal]:
+    return range_meals(db, user, date, date)
+
+
+def shared_meals(db: Session, user: User, days: int = SHARED_MEAL_DAYS) -> list[dict]:
+    """Recent meals as the community sees them: sanitized, and tagged with the owner's local day."""
+    today = local_today(user)
+    zone = ZoneInfo(user.timezone)
+    meals = range_meals(db, user, today - timedelta(days=days - 1), today)[:SHARED_MEAL_LIMIT]
+    return [meal_dict(meal, shared=True) | {"date": meal_date(meal, zone).isoformat()} for meal in meals]
 
 
 def logging_streak(db: Session, user: User, today: Date) -> int:
@@ -106,7 +127,7 @@ def day_summary(db: Session, user: User, date: Date | None = None, days: int = 7
     zone = ZoneInfo(user.timezone)
     selected_meals = []
     for meal in rows:
-        day = meal.logged_at.replace(tzinfo=timezone.utc).astimezone(zone).date().isoformat()
+        day = meal_date(meal, zone).isoformat()
         bucket = weekly[day]
         bucket["meal_count"] += 1
         for key in NUTRIENTS:

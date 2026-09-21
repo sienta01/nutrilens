@@ -1337,6 +1337,19 @@ input[type="file"] {
   font-weight: 600;
   margin: 0 0 12px;
 }
+.community-day + .community-day {
+  margin-top: 15px;
+  border-top: 1px dashed var(--line);
+  padding-top: 13px;
+}
+.community-day h5 {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: #b4bba6;
+  font-weight: 600;
+  margin: 0;
+}
 .community-meal {
   display: flex;
   justify-content: space-between;
