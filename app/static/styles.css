@@ -876,6 +876,14 @@ input[type="file"] {
   flex-direction: column;
   position: relative;
 }
+button.chart-column {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  border-radius: 6px;
+}
 .chart-bar {
   background: #e4e9d9;
   width: 100%;
@@ -928,7 +936,7 @@ input[type="file"] {
   z-index: 3;
 }
 .chart-column:hover .chart-tooltip,
-.chart-column:focus .chart-tooltip {
+.chart-column:focus-visible .chart-tooltip {
   opacity: 1;
 }
 .consistency-card {
@@ -1330,37 +1338,63 @@ input[type="file"] {
   margin-top: 20px;
 }
 .community-meals h4 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 1px;
   color: #a1a893;
   font-weight: 600;
-  margin: 0 0 12px;
-}
-.community-day + .community-day {
-  margin-top: 15px;
-  border-top: 1px dashed var(--line);
-  padding-top: 13px;
-}
-.community-day h5 {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.9px;
-  color: #b4bba6;
-  font-weight: 600;
   margin: 0;
+}
+.community-day-label {
+  color: var(--orange);
+  letter-spacing: 0.9px;
+}
+.community-meals-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  font-size: 10px;
+  color: #a3aa98;
 }
 .community-meal {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  gap: 10px;
-  margin-top: 9px;
+  gap: 11px;
+  margin-top: 12px;
   font-size: 11px;
   color: #76816b;
 }
-.community-meal span:last-child {
+.community-meal-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.community-meal-meta {
+  font-size: 9px;
+  color: #a3aa98;
+  text-transform: capitalize;
+}
+.community-meal-figures {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+.community-meal-kcal {
   font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.community-meal-macros {
+  font-size: 9px;
   color: #a3aa98;
   white-space: nowrap;
 }
@@ -2577,14 +2611,16 @@ input[type="file"] {
   flex-shrink: 0;
 }
 .community-meal-name {
-  flex: 1;
-  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.community-meal {
-  gap: 10px;
-}
-.community-meal > span:last-child {
-  flex-shrink: 0;
+.community-meal-photo.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f2f0e6;
+  font-size: 19px;
 }
 
 .plan-grid {

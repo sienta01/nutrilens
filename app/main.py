@@ -25,7 +25,8 @@ from app.schemas import Login, MealCreate, MealType, MealUpdate, Register, Setti
 from app.security import RateLimiter, RedactSecrets, hash_password, token_hash, verify_password
 from app.services import (
     SHARED_MEAL_DAYS, add_photo_meal, can_view_image, day_meals, day_summary, delete_meal,
-    image_file, iso, meal_dict, shared_meals, to_utc, user_dict,
+    image_file, iso, local_today, meal_dict, same_community, shared_meals, shared_window,
+    to_utc, user_dict,
 )
 
 class DropPollingNoise(logging.Filter):
@@ -391,7 +392,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/community")
     def community(limit: int = Query(24, ge=1, le=100), offset: int = Query(0, ge=0),
-                  days: int = Query(SHARED_MEAL_DAYS, ge=1, le=30),
                   user: User = Depends(current_user), db: Session = Depends(get_db)):
         query = select(User).where(User.share_progress.is_(True), User.is_demo == user.is_demo)
         if user.is_demo:
@@ -399,8 +399,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         members = db.scalars(query.order_by(User.display_name, User.id).limit(limit).offset(offset))
         profiles = []
         for member in members:
-            summary = day_summary(db, member, None, days)
-            shared = shared_meals(db, member, days) if member.share_meals else []
+            summary = day_summary(db, member)
+            # Only the member's current day rides along with the profile. The page polls this
+            # every 30s, so the other six days of the window are fetched per day, on request.
+            today = local_today(member)
+            shared = shared_meals(db, member, today, today) if member.share_meals else []
             profiles.append({
                 "id": member.id, "display_name": member.display_name,
                 "initials": "".join(part[0] for part in member.display_name.split()[:2]).upper(),
@@ -410,7 +413,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "share_meals": member.share_meals,
                 "meals": shared,
             })
-        return {"users": profiles, "days": days}
+        return {"users": profiles, "days": SHARED_MEAL_DAYS}
+
+    @app.get("/api/community/{member_id}/meals")
+    def community_day(member_id: str,
+                      date: Date = Query(..., ge=Date(1970, 1, 1), le=Date(2100, 12, 31)),
+                      user: User = Depends(current_user), db: Session = Depends(get_db)):
+        member = db.get(User, member_id)
+        # One refusal for every reason: whether an account exists is not the caller's business,
+        # and sharing is re-checked here rather than trusted from the listing that linked here.
+        if not member or not member.share_progress or not member.share_meals or not same_community(user, member):
+            raise HTTPException(404, "Those meals are not shared.")
+        first, last = shared_window(member)
+        if not first <= date <= last:
+            raise HTTPException(404, "Those meals are not shared.")
+        return {"date": date.isoformat(), "meals": shared_meals(db, member, date, date)}
 
     @app.post("/api/telegram/link")
     def telegram_link(user: User = Depends(current_user), db: Session = Depends(get_db)):

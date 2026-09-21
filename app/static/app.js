@@ -25,6 +25,15 @@ const initials = (name) =>
     .map((part) => part[0])
     .join("")
     .toUpperCase();
+const MEAL_TYPES = ["breakfast", "lunch", "dinner", "snack"];
+const MEAL_EMOJI = {
+  breakfast: "🥑",
+  lunch: "🥗",
+  dinner: "🍲",
+  snack: "🍓",
+};
+const mealType = (meal) =>
+  MEAL_TYPES.includes(meal.meal_type) ? meal.meal_type : "snack";
 const icons = {
   overview:
     '<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
@@ -86,6 +95,8 @@ const state = {
   days: 7,
   dashboard: null,
   community: [],
+  communityDay: {},
+  communityMeals: {},
   authTab: "login",
   modal: null,
   requestId: 0,
@@ -123,12 +134,12 @@ function shiftDate(date, delta) {
 function readableDate(date, options = { month: "short", day: "numeric" }) {
   return dateObject(date).toLocaleDateString(undefined, options);
 }
-function mealTime(value) {
+function mealTime(value, zone) {
   try {
     return new Date(value).toLocaleTimeString(undefined, {
       hour: "numeric",
       minute: "2-digit",
-      timeZone: state.user?.timezone || undefined,
+      timeZone: zone || state.user?.timezone || undefined,
     });
   } catch {
     return "";
@@ -285,6 +296,24 @@ async function loadPage() {
   }
 }
 
+function clearCommunityCache() {
+  state.community = [];
+  state.communityDay = {};
+  state.communityMeals = {};
+}
+function renderCommunityPage(focusUser, focusDate) {
+  const main = $("#main-content");
+  if (!main) return;
+  main.innerHTML = renderCommunity();
+  // innerHTML replaces the bar that was just pressed, so put focus back on its replacement.
+  if (focusUser)
+    [...main.querySelectorAll('[data-action="community-day"]')]
+      .find(
+        (bar) => bar.dataset.user === focusUser && bar.dataset.date === focusDate,
+      )
+      ?.focus();
+}
+
 // Pick up Telegram meals while the dashboard is open, without replacing an
 // active form or interrupting keyboard navigation. Refresh only changed data.
 let backgroundRefreshRunning = false;
@@ -332,7 +361,7 @@ async function refreshProgress() {
     if (error.status === 401 && state.requestId === currentRequest) {
       state.user = null;
       state.dashboard = null;
-      state.community = [];
+      clearCommunityCache();
       renderAuth("Your session expired. Please sign in again.");
     }
   } finally {
@@ -382,7 +411,16 @@ function renderDashboard() {
           )
     }</div></section><div class="footer-note">${icon("heart", 11)}Progress is personal. Every small step counts.</div>`;
 }
-function weeklyChart(entries = [], goal = 2000, compact = false) {
+function chartColumn(day, top, label, owner, selected) {
+  const current = day.date === selected;
+  const body = `<div class="chart-tooltip">${esc(readableDate(day.date))} · ${fmt(day.calories)} kcal</div><div class="chart-bar" style="height:${pct(day.calories, top)}%"></div>${label}`;
+  const name = `${esc(readableDate(day.date, { month: "short", day: "numeric" }))}: ${fmt(day.calories)} calories`;
+  // A community card's bars pick which day's shared meals sit below it, so they are real buttons.
+  return owner
+    ? `<button type="button" class="chart-column${current ? " current" : ""}" data-action="community-day" data-user="${esc(owner.id)}" data-date="${esc(day.date)}" aria-pressed="${current}" aria-label="Show ${name}">${body}</button>`
+    : `<div class="chart-column${current ? " current" : ""}" tabindex="0" aria-label="${name}">${body}</div>`;
+}
+function weeklyChart(entries = [], goal = 2000, compact = false, owner = null) {
   const max = Math.max(
     number(goal) * 1.2,
     ...entries.map((day) => number(day.calories) * 1.1),
@@ -394,21 +432,15 @@ function weeklyChart(entries = [], goal = 2000, compact = false) {
       entries.length
     : 0;
   const step = entries.length > 14 ? Math.ceil(entries.length / 6) : 1;
-  return `<div class="${compact ? "shared-chart" : ""}"><div class="chart-summary"><strong>${fmt(average)}</strong><span>kcal daily average</span></div><div class="chart-legend"><span class="dash"></span>Daily goal · ${fmt(goal)} kcal</div><div class="chart${entries.length > 14 ? " chart-30" : ""}" role="group" aria-label="Daily calorie intake chart"><div class="chart-grid"><div><span>${fmt(top)}</span></div><div><span>${fmt(top / 2)}</span></div><div><span>0</span></div></div><div class="chart-goal" style="bottom:calc(25px + (100% - 25px) * ${pct(goal, top) / 100})" aria-hidden="true"></div><div class="chart-bars">${entries.map((day, index) => `<div class="chart-column${day.date === state.date ? " current" : ""}" tabindex="0" aria-label="${esc(readableDate(day.date, { month: "short", day: "numeric" }))}: ${fmt(day.calories)} calories"><div class="chart-tooltip">${esc(readableDate(day.date))} · ${fmt(day.calories)} kcal</div><div class="chart-bar" style="height:${pct(day.calories, top)}%"></div>${index % step === 0 || index === entries.length - 1 ? `<span class="chart-label">${esc(readableDate(day.date, entries.length > 14 ? { month: "short", day: "numeric" } : { weekday: "short" }))}</span>` : ""}</div>`).join("")}</div></div></div>`;
+  return `<div class="${compact ? "shared-chart" : ""}"><div class="chart-summary"><strong>${fmt(average)}</strong><span>kcal daily average</span></div><div class="chart-legend"><span class="dash"></span>Daily goal · ${fmt(goal)} kcal</div><div class="chart${entries.length > 14 ? " chart-30" : ""}" role="group" aria-label="${owner ? "Daily calories. Choose a day to see the meals shared on it." : "Daily calorie intake chart"}"><div class="chart-grid"><div><span>${fmt(top)}</span></div><div><span>${fmt(top / 2)}</span></div><div><span>0</span></div></div><div class="chart-goal" style="bottom:calc(25px + (100% - 25px) * ${pct(goal, top) / 100})" aria-hidden="true"></div><div class="chart-bars">${entries.map((day, index) => chartColumn(day, top, index % step === 0 || index === entries.length - 1 ? `<span class="chart-label">${esc(readableDate(day.date, entries.length > 14 ? { month: "short", day: "numeric" } : { weekday: "short" }))}</span>` : "", owner, owner ? owner.selected : state.date)).join("")}</div></div></div>`;
 }
 function streakCard(data) {
   const recent = data.weekly.slice(-7);
   return `<div class="consistency-card"><div class="eyebrow">SHOWING UP FOR YOURSELF</div><div class="streak-number">${fmt(data.streak)}${icon("flame", 31)}</div><h3>${number(data.streak) === 1 ? "day of consistency" : "days of consistency"}</h3><p>${number(data.streak) > 0 ? "A little intention goes a long way. Keep making time for you." : "Your next small step starts with a meal. Let’s build a rhythm."}</p><div class="streak-days">${recent.map((day) => `<div class="streak-day"><span class="streak-check${number(day.meal_count) > 0 ? " checked" : ""}" aria-label="${esc(readableDate(day.date))}: ${number(day.meal_count) > 0 ? "meal logged" : "no meals"}">${number(day.meal_count) > 0 ? icon("check", 12) : "<span>·</span>"}</span><span>${esc(readableDate(day.date, { weekday: "narrow" }))}</span></div>`).join("")}</div></div>`;
 }
 function mealCard(meal) {
-  const type = ["breakfast", "lunch", "dinner", "snack"].includes(
-    meal.meal_type,
-  )
-    ? meal.meal_type
-    : "snack";
-  const emoji = { breakfast: "🥑", lunch: "🥗", dinner: "🍲", snack: "🍓" }[
-    type
-  ];
+  const type = mealType(meal);
+  const emoji = MEAL_EMOJI[type];
   const imageUrl = safeImage(meal.image_url);
   return `<article class="card meal-card"><div class="meal-image ${type}">${imageUrl ? `<img src="${esc(imageUrl)}" alt="${esc(meal.name)}" loading="lazy"/>` : `<span class="meal-illustration" aria-hidden="true">${emoji}</span>`}<span class="meal-type">${icon(type === "dinner" ? "moon" : "sun", 9)}${type}</span><button class="meal-edit" data-action="edit-meal" data-id="${esc(meal.id)}" aria-label="Edit ${esc(meal.name)}">${icon("edit", 12)}</button></div><div class="meal-card-content"><div class="meal-title-line"><h3 title="${esc(meal.name)}"><button data-action="edit-meal" data-id="${esc(meal.id)}">${esc(meal.name)}</button></h3></div><div class="meal-time">${icon("clock", 10)}${esc(mealTime(meal.logged_at))}${meal.source === "telegram" ? ` · ${icon("plane", 10)} Telegram` : ""}</div><div class="meal-calories">${icon("flame", 13)}<strong>${fmt(meal.calories)}</strong>kcal${meal.estimated ? '<span class="estimate-tag">Estimated</span>' : ""}</div><div class="meal-macros"><span><i class="macro-dot" style="background:#9aaf89"></i><b>${fmt(meal.protein)}g</b> protein</span><span><i class="macro-dot" style="background:#e6bf73"></i><b>${fmt(meal.carbs)}g</b> carbs</span><span><i class="macro-dot" style="background:#e9a584"></i><b>${fmt(meal.fat)}g</b> fat</span></div></div></article>`;
 }
@@ -422,26 +454,40 @@ function sharedDayLabel(date, today) {
   if (date === shiftDate(today, -1)) return "Yesterday";
   return readableDate(date, { weekday: "short", month: "short", day: "numeric" });
 }
+function communitySelectedDay(user) {
+  return state.communityDay[String(user.id)] || user.date;
+}
+// The profile payload always carries the member's current day. Any other day in the window is
+// fetched when its bar is picked and kept here, so going back to it costs nothing.
+function communityDayMeals(user, date) {
+  if (date === user.date) return Array.isArray(user.meals) ? user.meals : [];
+  return state.communityMeals[`${user.id}|${date}`];
+}
+function sharedMealRow(meal, zone) {
+  const type = mealType(meal);
+  const image = safeImage(meal.image_url);
+  const time = mealTime(meal.logged_at, zone);
+  return `<div class="community-meal">${image ? `<img class="community-meal-photo" src="${esc(image)}" alt="${esc(meal.name)}" loading="lazy"/>` : `<span class="community-meal-photo placeholder" aria-hidden="true">${MEAL_EMOJI[type]}</span>`}<div class="community-meal-body"><span class="community-meal-name" title="${esc(meal.name)}">${esc(meal.name)}</span><span class="community-meal-meta">${esc(type)}${time ? ` · ${esc(time)}` : ""}</span></div><div class="community-meal-figures"><span class="community-meal-kcal">${meal.estimated ? "≈ " : ""}${fmt(meal.calories)} kcal</span><span class="community-meal-macros">${fmt(meal.protein)}P · ${fmt(meal.carbs)}C · ${fmt(meal.fat)}F</span></div></div>`;
+}
 function sharedMealFeed(user) {
-  const meals = Array.isArray(user.meals) ? user.meals : [];
-  if (!meals.length)
-    return '<p class="small muted" style="margin-top:19px;font-size:10px">No individual meals shared recently.</p>';
-  // Meals arrive newest first, so insertion order already groups the days in reverse.
-  const days = new Map();
-  for (const meal of meals) {
-    const key = meal.date || user.date || "";
-    if (!days.has(key)) days.set(key, []);
-    days.get(key).push(meal);
-  }
-  return `<div class="community-meals"><h4>Shared meals</h4>${[...days]
-    .map(
-      ([date, entries]) =>
-        `<div class="community-day"><h5>${esc(sharedDayLabel(date, user.date))}</h5>${entries.map((meal) => `<div class="community-meal">${safeImage(meal.image_url) ? `<img class="community-meal-photo" src="${esc(safeImage(meal.image_url))}" alt="${esc(meal.name)}" loading="lazy"/>` : ""}<span class="community-meal-name">${esc(meal.name)}</span><span>${meal.estimated ? "≈ " : ""}${fmt(meal.calories)} kcal</span></div>`).join("")}</div>`,
-    )
-    .join("")}</div>`;
+  if (!user.share_meals)
+    return '<p class="community-meals-note">This member shares progress only.</p>';
+  const date = communitySelectedDay(user);
+  const meals = communityDayMeals(user, date);
+  let body;
+  if (meals === "error")
+    body =
+      '<p class="community-meals-note">We couldn’t load that day. Pick it again to retry.</p>';
+  else if (!Array.isArray(meals))
+    body =
+      '<p class="community-meals-note"><span class="spinner"></span>Loading…</p>';
+  else if (!meals.length)
+    body = '<p class="community-meals-note">No meals shared on this day.</p>';
+  else body = meals.map((meal) => sharedMealRow(meal, user.timezone)).join("");
+  return `<div class="community-meals"><h4>Shared meals<span class="community-day-label">${esc(sharedDayLabel(date, user.date))}</span></h4>${body}</div>`;
 }
 function renderCommunity() {
-  return `${heading("Better, together.", "A shared space for small wins and everyday inspiration.", false)}<section class="community-banner"><div><h3>${state.user.share_progress ? "You’re part of the picture." : "Your journey is yours to share."}</h3><p>${state.user.share_progress ? "Your daily totals and weekly progress are visible here. You decide whether to share individual meals, too." : "Get inspired by people who have chosen to share their progress. Your own activity stays private until you opt in."}</p></div><button class="btn btn-secondary btn-small" data-action="navigate" data-page="settings">${icon("settings", 13)}Sharing settings</button></section><div class="section-toolbar"><h2>Community progress</h2><span class="small muted">${state.community.length} sharing</span></div><div class="community-grid">${state.community.length ? state.community.map((user) => `<article class="card community-user"><div class="community-user-header"><div class="avatar">${esc(user.initials || initials(user.display_name))}</div><div><h3>${esc(user.display_name)}${String(user.id) === String(state.user.id) ? ' <span class="muted small">(you)</span>' : ""}</h3><p>Today’s balance</p></div><span class="chip">${icon("flame", 12)}${fmt(user.streak)} day${number(user.streak) === 1 ? "" : "s"}</span></div><div class="community-total">${fmt(user.totals.calories)} <span>/ ${fmt(user.daily_calorie_goal)} kcal</span></div><div class="progress-track community-progress"><div class="progress-fill" style="width:${pct(user.totals.calories, user.daily_calorie_goal)}%;background:#a5b796"></div></div>${weeklyChart(user.weekly, user.daily_calorie_goal, true)}${sharedMealFeed(user)}</article>`).join("") : emptyState("Room for the first small win", "No one has shared progress yet. You can be the first by turning on progress sharing in settings.", "navigate-settings", "Choose what to share", "community")}</div>`;
+  return `${heading("Better, together.", "A shared space for small wins and everyday inspiration.", false)}<section class="community-banner"><div><h3>${state.user.share_progress ? "You’re part of the picture." : "Your journey is yours to share."}</h3><p>${state.user.share_progress ? "Your daily totals and weekly progress are visible here. You decide whether to share individual meals, too." : "Get inspired by people who have chosen to share their progress. Your own activity stays private until you opt in."}</p></div><button class="btn btn-secondary btn-small" data-action="navigate" data-page="settings">${icon("settings", 13)}Sharing settings</button></section><div class="section-toolbar"><h2>Community progress</h2><span class="small muted">${state.community.length} sharing</span></div><div class="community-grid">${state.community.length ? state.community.map((user) => `<article class="card community-user"><div class="community-user-header"><div class="avatar">${esc(user.initials || initials(user.display_name))}</div><div><h3>${esc(user.display_name)}${String(user.id) === String(state.user.id) ? ' <span class="muted small">(you)</span>' : ""}</h3><p>Today’s balance</p></div><span class="chip">${icon("flame", 12)}${fmt(user.streak)} day${number(user.streak) === 1 ? "" : "s"}</span></div><div class="community-total">${fmt(user.totals.calories)} <span>/ ${fmt(user.daily_calorie_goal)} kcal</span></div><div class="progress-track community-progress"><div class="progress-fill" style="width:${pct(user.totals.calories, user.daily_calorie_goal)}%;background:#a5b796"></div></div>${weeklyChart(user.weekly, user.daily_calorie_goal, true, { id: String(user.id), selected: communitySelectedDay(user) })}${sharedMealFeed(user)}</article>`).join("") : emptyState("Room for the first small win", "No one has shared progress yet. You can be the first by turning on progress sharing in settings.", "navigate-settings", "Choose what to share", "community")}</div>`;
 }
 function photoPrivacyNotice() {
   return esc(
@@ -732,6 +778,7 @@ document.addEventListener("click", async (event) => {
       state.user = null;
       state.demo = false;
       state.dashboard = null;
+      clearCommunityCache();
       state.requestId++;
       closeModal();
       history.replaceState(null, "", location.pathname);
@@ -771,6 +818,26 @@ document.addEventListener("click", async (event) => {
           ? today()
           : shiftDate(state.date, action === "previous-date" ? -1 : 1);
       await loadPage();
+    } else if (action === "community-day") {
+      const owner = button.dataset.user;
+      const date = button.dataset.date;
+      const profile = state.community.find((entry) => String(entry.id) === owner);
+      if (!profile) return;
+      state.communityDay[owner] = date;
+      const key = `${owner}|${date}`;
+      if (date !== profile.date && !Array.isArray(state.communityMeals[key])) {
+        state.communityMeals[key] = "loading";
+        renderCommunityPage(owner, date);
+        try {
+          const data = await api(
+            `/api/community/${encodeURIComponent(owner)}/meals?date=${encodeURIComponent(date)}`,
+          );
+          state.communityMeals[key] = data.meals || [];
+        } catch {
+          state.communityMeals[key] = "error";
+        }
+      }
+      renderCommunityPage(owner, date);
     } else if (action === "chart-days") {
       state.days = Number(button.dataset.days);
       await loadPage();

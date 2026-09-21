@@ -11,7 +11,7 @@ from app.models import Meal, User, utcnow
 from app.planning import fasting_status, goal_plan
 
 NUTRIENTS = ("calories", "protein", "carbs", "fat")
-# How far back shared meals reach, and the cap on one profile's feed so a poll stays small.
+# How far back a sharing account publishes, and the cap on one reply so a poll stays small.
 SHARED_MEAL_DAYS = 7
 SHARED_MEAL_LIMIT = 60
 
@@ -85,11 +85,16 @@ def day_meals(db: Session, user: User, date: Date) -> list[Meal]:
     return range_meals(db, user, date, date)
 
 
-def shared_meals(db: Session, user: User, days: int = SHARED_MEAL_DAYS) -> list[dict]:
-    """Recent meals as the community sees them: sanitized, and tagged with the owner's local day."""
+def shared_window(user: User) -> tuple[Date, Date]:
+    """The only days a sharing account publishes: its last SHARED_MEAL_DAYS local days."""
     today = local_today(user)
+    return today - timedelta(days=SHARED_MEAL_DAYS - 1), today
+
+
+def shared_meals(db: Session, user: User, first: Date, last: Date) -> list[dict]:
+    """Meals as the community sees them: sanitized, and tagged with the owner's local day."""
     zone = ZoneInfo(user.timezone)
-    meals = range_meals(db, user, today - timedelta(days=days - 1), today)[:SHARED_MEAL_LIMIT]
+    meals = range_meals(db, user, first, last)[:SHARED_MEAL_LIMIT]
     return [meal_dict(meal, shared=True) | {"date": meal_date(meal, zone).isoformat()} for meal in meals]
 
 

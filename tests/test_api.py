@@ -314,32 +314,69 @@ def test_progress_and_meal_sharing_require_separate_opt_ins_and_revoke(client, s
     assert owner_id not in {user["id"] for user in community(second_client)}
 
 
-def test_shared_meals_span_recent_days_and_carry_their_local_day(client, second_client):
+def test_community_listing_carries_only_the_members_current_day(client, second_client):
     register(client)
     owner_id = current_user(client)["id"]
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     create_meal(client, name="Bowl from today")
     create_meal(client, name="Bowl from three days ago", logged_at=(now - timedelta(days=3)).isoformat())
+    assert client.patch("/api/me", json={"share_progress": True, "share_meals": True}).status_code == 200
+    register(second_client, email="blair@example.com", display_name="Blair")
+
+    response = second_client.get("/api/community")
+    assert response.json()["days"] == 7
+    shared = next(user for user in response.json()["users"] if user["id"] == owner_id)
+    # The page polls this every 30 seconds, so older days must not ride along with it.
+    assert [meal["name"] for meal in shared["meals"]] == ["Bowl from today"]
+    assert shared["meals"][0]["date"] == shared["date"]
+    assert "Bowl from three days ago" not in response.text
+    assert "One bowl" not in response.text
+
+
+def test_a_shared_day_is_fetched_on_request_within_the_seven_day_window(client, second_client):
+    register(client)
+    owner_id = current_user(client)["id"]
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    wanted = (now - timedelta(days=3)).date()
+    create_meal(client, name="Bowl from three days ago", logged_at=(now - timedelta(days=3)).isoformat())
     create_meal(client, name="Bowl from three weeks ago", logged_at=(now - timedelta(days=21)).isoformat())
     assert client.patch("/api/me", json={"share_progress": True, "share_meals": True}).status_code == 200
     register(second_client, email="blair@example.com", display_name="Blair")
 
-    shared = next(user for user in community(second_client) if user["id"] == owner_id)
-    names = [meal["name"] for meal in shared["meals"]]
-    assert names == ["Bowl from today", "Bowl from three days ago"]
-    assert shared["meals"][0]["date"] == shared["date"]
-    assert shared["meals"][1]["date"] == (now - timedelta(days=3)).date().isoformat()
-    assert all(meal["notes"] == "" and meal["source"] == "shared" for meal in shared["meals"])
-
-    response = second_client.get("/api/community", params={"days": 30})
+    response = second_client.get(f"/api/community/{owner_id}/meals", params={"date": wanted.isoformat()})
     assert response.status_code == 200, response.text
-    assert response.json()["days"] == 30
-    wider = next(user for user in response.json()["users"] if user["id"] == owner_id)
-    assert "Bowl from three weeks ago" in {meal["name"] for meal in wider["meals"]}
-    assert "One bowl" not in response.text
+    assert response.json()["date"] == wanted.isoformat()
+    assert [meal["name"] for meal in response.json()["meals"]] == ["Bowl from three days ago"]
+    assert all(meal["notes"] == "" and meal["source"] == "shared" for meal in response.json()["meals"])
 
-    assert client.patch("/api/me", json={"share_meals": False}).status_code == 200
-    assert second_client.get("/api/community", params={"days": 30}).text.count("Bowl from") == 0
+    outside = (now - timedelta(days=21)).date().isoformat()
+    assert second_client.get(f"/api/community/{owner_id}/meals", params={"date": outside}).status_code == 404
+    ahead = (now + timedelta(days=1)).date().isoformat()
+    assert second_client.get(f"/api/community/{owner_id}/meals", params={"date": ahead}).status_code == 404
+
+
+def test_a_shared_day_refuses_every_reason_the_same_way(client, second_client):
+    register(client)
+    owner_id = current_user(client)["id"]
+    create_meal(client, name="Bowl from today")
+    register(second_client, email="blair@example.com", display_name="Blair")
+    today = datetime.now(timezone.utc).date().isoformat()
+    path = f"/api/community/{owner_id}/meals"
+
+    private = second_client.get(path, params={"date": today})
+    assert private.status_code == 404
+    client.patch("/api/me", json={"share_progress": True})
+    progress_only = second_client.get(path, params={"date": today})
+    assert progress_only.status_code == 404
+    missing = second_client.get("/api/community/no-such-account/meals", params={"date": today})
+    assert missing.status_code == 404
+    # An absent account and a private one must be indistinguishable to the caller.
+    assert private.json() == progress_only.json() == missing.json()
+
+    client.patch("/api/me", json={"share_meals": True})
+    assert second_client.get(path, params={"date": today}).status_code == 200
+    client.patch("/api/me", json={"share_progress": False})
+    assert second_client.get(path, params={"date": today}).status_code == 404
 
 
 def test_meal_sharing_alone_does_not_publish_account(client, second_client):
